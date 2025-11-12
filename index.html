@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PyTorch Digit Recognizer (Flask)</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Define a custom font */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        #drawingCanvas {
+            border: 4px solid #3b82f6; /* Blue border */
+            cursor: crosshair;
+            background-color: #000000; /* Canvas background is black for MNIST-style input */
+        }
+        .result-bar-container {
+            height: 1.5rem;
+            background-color: #e5e7eb;
+            border-radius: 0.25rem;
+            overflow: hidden;
+            margin-bottom: 0.5rem;
+        }
+        .result-bar {
+            height: 100%;
+            background-color: #3b82f6;
+            transition: width 0.3s ease-in-out;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+
+    <div class="w-full max-w-lg bg-white shadow-2xl rounded-xl p-8 space-y-6">
+        <header class="text-center">
+            <h1 class="text-3xl font-bold text-gray-800">PyTorch Handwriting Recognizer</h1>
+            <p class="text-sm text-gray-500 mt-1">Draw a single digit (0-9) on the canvas below.</p>
+        </header>
+
+        <!-- Main Interaction Area -->
+        <div class="flex flex-col items-center space-y-4">
+            <canvas id="drawingCanvas" width="280" height="280" class="rounded-lg"></canvas>
+            
+            <div class="flex space-x-4 w-full justify-center">
+                <button id="predictButton" class="px-6 py-2 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 transition duration-150 active:scale-95 disabled:bg-gray-400">
+                    Predict Digit
+                </button>
+                <button id="clearButton" class="px-6 py-2 bg-red-500 text-white font-semibold rounded-lg shadow-md hover:bg-red-600 transition duration-150 active:scale-95">
+                    Clear
+                </button>
+            </div>
+        </div>
+
+        <!-- Prediction Result Display -->
+        <div id="resultArea" class="mt-6 border-t pt-4">
+            <h2 class="text-xl font-semibold text-gray-700 mb-2">Prediction: <span id="predictedDigit" class="text-blue-600">--</span></h2>
+            <div id="confidenceDisplay" class="text-sm text-gray-600">Confidence: <span id="confidenceValue">--%</span></div>
+
+            <div id="probabilityBars" class="mt-4">
+                <!-- Probability bars will be dynamically inserted here -->
+            </div>
+            
+            <p id="messageBox" class="text-sm text-red-500 mt-4 hidden">An error occurred.</p>
+            <div id="loadingIndicator" class="text-center mt-4 hidden">
+                <div class="animate-spin inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
+                <p class="text-gray-500">Processing...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Canvas Setup ---
+        const canvas = document.getElementById('drawingCanvas');
+        const ctx = canvas.getContext('2d');
+        let isDrawing = false;
+        const brushSize = 20; // Thicker brush for easier detection
+        
+        // Initial setup: Black canvas, white drawing color
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = brushSize;
+        ctx.lineCap = 'round';
+
+        // --- UI Elements ---
+        const predictButton = document.getElementById('predictButton');
+        const clearButton = document.getElementById('clearButton');
+        const predictedDigitSpan = document.getElementById('predictedDigit');
+        const confidenceValueSpan = document.getElementById('confidenceValue');
+        const probabilityBarsDiv = document.getElementById('probabilityBars');
+        const messageBox = document.getElementById('messageBox');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+
+        // --- Drawing Logic ---
+
+        function startDrawing(e) {
+            isDrawing = true;
+            draw(e);
+        }
+
+        function stopDrawing() {
+            isDrawing = false;
+            ctx.beginPath();
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            let x, y;
+
+            if (e.touches) {
+                x = e.touches[0].clientX - rect.left;
+                y = e.touches[0].clientY - rect.top;
+            } else {
+                x = e.clientX - rect.left;
+                y = e.clientY - rect.top;
+            }
+
+            // Draw line
+            ctx.lineTo(x, y);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+        }
+
+        // Attach mouse and touch events
+        canvas.addEventListener('mousedown', startDrawing);
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mousemove', draw);
+        
+        canvas.addEventListener('touchstart', startDrawing);
+        canvas.addEventListener('touchend', stopDrawing);
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault(); // Prevent scrolling on touch
+            draw(e);
+        }, { passive: false });
+
+        // --- Utility Functions ---
+        
+        function clearCanvas() {
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            predictedDigitSpan.textContent = '--';
+            confidenceValueSpan.textContent = '--%';
+            probabilityBarsDiv.innerHTML = '';
+            messageBox.classList.add('hidden');
+        }
+
+        function renderProbabilities(probabilities) {
+            probabilityBarsDiv.innerHTML = '';
+            // Convert string-float map to array of objects
+            const probArray = Object.keys(probabilities).map(digit => ({
+                digit: digit,
+                prob: parseFloat(probabilities[digit])
+            }));
+
+            // Sort by probability descending
+            probArray.sort((a, b) => b.prob - a.prob);
+
+            probArray.forEach(({ digit, prob }) => {
+                const percentage = (prob * 100).toFixed(2);
+                const bar = `
+                    <div class="flex items-center text-sm font-medium">
+                        <span class="w-8 text-center text-gray-700">${digit}:</span>
+                        <div class="flex-grow ml-2 result-bar-container">
+                            <div class="result-bar" style="width: ${percentage}%;"></div>
+                        </div>
+                        <span class="ml-2 w-12 text-right text-gray-600">${percentage}%</span>
+                    </div>
+                `;
+                probabilityBarsDiv.innerHTML += bar;
+            });
+        }
+        
+        // --- API Interaction ---
+
+        async function predictDigit() {
+            messageBox.classList.add('hidden');
+            loadingIndicator.classList.remove('hidden');
+            predictButton.disabled = true;
+
+            try {
+                // Convert canvas content to data URL
+                const imageDataURL = canvas.toDataURL('image/png');
+                
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ image_data: imageDataURL })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Server returned status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                if (data.error) {
+                    messageBox.textContent = `Prediction failed: ${data.error}`;
+                    messageBox.classList.remove('hidden');
+                    return;
+                }
+
+                // Update UI
+                predictedDigitSpan.textContent = data.prediction;
+                confidenceValueSpan.textContent = `${(parseFloat(data.confidence) * 100).toFixed(2)}%`;
+                renderProbabilities(data.probabilities);
+
+            } catch (error) {
+                console.error('Fetch error:', error);
+                messageBox.textContent = 'Failed to connect to the prediction server.';
+                messageBox.classList.remove('hidden');
+            } finally {
+                loadingIndicator.classList.add('hidden');
+                predictButton.disabled = false;
+            }
+        }
+
+        // --- Event Listeners ---
+        predictButton.addEventListener('click', predictDigit);
+        clearButton.addEventListener('click', clearCanvas);
+
+    </script>
+</body>
+</html> 
